@@ -43,20 +43,25 @@ class TrayController(QObject):
         self.tray_icon = QSystemTrayIcon(_make_status_icon(_STATE_COLORS[None]), main_window)
         self.tray_icon.setToolTip("AI Focus Tracker - starting…")
 
-        menu = QMenu()
-        self._status_action = menu.addAction("Status: Starting…")
+        # QSystemTrayIcon.setContextMenu() does NOT take ownership of the
+        # menu (per Qt's own docs) - unlike setCentralWidget/setMenuBar,
+        # nothing reparents it. Without keeping our own reference, the menu
+        # (and its actions) would have no owner and could be garbage
+        # collected out from under the tray icon.
+        self._menu = QMenu()
+        self._status_action = self._menu.addAction("Status: Starting…")
         self._status_action.setEnabled(False)
-        menu.addSeparator()
-        show_action = menu.addAction("Show")
+        self._menu.addSeparator()
+        show_action = self._menu.addAction("Show")
         show_action.triggered.connect(self._on_show)
-        self._pause_action = menu.addAction("Pause")
+        self._pause_action = self._menu.addAction("Pause")
         self._pause_action.triggered.connect(self._on_pause_resume)
         self._pause_action.setEnabled(False)
-        menu.addSeparator()
-        exit_action = menu.addAction("Exit")
+        self._menu.addSeparator()
+        exit_action = self._menu.addAction("Exit")
         exit_action.triggered.connect(self._on_exit)
 
-        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.setContextMenu(self._menu)
         self.tray_icon.activated.connect(self._on_activated)
         self.tray_icon.show()
 

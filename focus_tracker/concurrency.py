@@ -49,7 +49,16 @@ class PeriodicWorker:
         if self._thread is None:
             return
         self._stop_event.set()
-        self._thread.join(timeout=timeout)
+        thread = self._thread
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            # The underlying OS thread is still running (action() is stuck
+            # on something blocking) - dropping our reference here doesn't
+            # kill it, it just means we stop waiting. Surfacing this is
+            # better than pretending the worker is stopped.
+            logger.warning(
+                "%s: did not stop within %.1fs - its thread may still be running", self._name, timeout
+            )
         self._thread = None
 
     def _run(self) -> None:

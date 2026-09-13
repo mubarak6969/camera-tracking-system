@@ -73,3 +73,23 @@ def test_starting_twice_does_not_spawn_a_second_thread():
 def test_interval_must_be_positive():
     with pytest.raises(ValueError):
         PeriodicWorker(interval_seconds=0, action=lambda: None)
+
+
+def test_stop_logs_a_warning_if_the_thread_does_not_join_in_time(caplog):
+    release = threading.Event()
+
+    def blocking_action() -> None:
+        release.wait(timeout=5.0)  # simulates a stuck/blocking action
+
+    worker = PeriodicWorker(interval_seconds=0.01, action=blocking_action, name="stuck-worker")
+    worker.start()
+    try:
+        # Give the thread a moment to actually enter the blocking action.
+        import time as _time
+
+        _time.sleep(0.05)
+        with caplog.at_level("WARNING"):
+            worker.stop(timeout=0.2)  # much shorter than the action's own 5s wait
+        assert any("did not stop within" in record.message for record in caplog.records)
+    finally:
+        release.set()  # let the real thread finish so it doesn't linger past the test
