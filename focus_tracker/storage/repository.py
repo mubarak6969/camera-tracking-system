@@ -5,6 +5,12 @@ lifecycle calls into SQL. It knows nothing about the state machine, the
 timer, or the UI - it just stores what it is given, in a transaction per
 call so a crash mid-write can never leave a half-written row behind.
 
+Every method takes `self._db.lock` before touching the connection: the
+controller's camera/input/poll/checkpoint threads can all call into this
+repository concurrently, and this is what actually serializes them rather
+than relying on assumptions about how the local SQLite build was
+compiled for threading.
+
 Never store camera frames, images, raw keyboard events, mouse
 coordinates, or key contents here - only state names and timestamps.
 """
@@ -16,6 +22,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from focus_tracker.storage.db import Database, StorageError
+
+# A session whose end_reason is one of these was never cleanly finalized:
+# NULL means create_session() ran but no checkpoint or shutdown ever
+# followed (crash within the first checkpoint interval); "in_progress"
+# means at least one checkpoint landed before the process disappeared.
+_UNFINALIZED_END_REASONS_SQL = "(end_reason IS NULL OR end_reason = 'in_progress')"
 
 
 @dataclass(frozen=True)
@@ -43,7 +55,7 @@ class SessionRepository:
     def create_session(self, started_at: Optional[datetime] = None) -> int:
         started_at = started_at or datetime.now(timezone.utc)
         try:
-            with self._db.connection:
+            with self._db.lock, self._db.connection:
                 cursor = self._db.connection.execute(
                     "INSERT INTO sessions (started_at_utc, total_work_seconds) VALUES (?, 0)",
                     (started_at.isoformat(),),
@@ -61,7 +73,7 @@ class SessionRepository:
     ) -> None:
         occurred_at = occurred_at or datetime.now(timezone.utc)
         try:
-            with self._db.connection:
+            with self._db.lock, self._db.connection:
                 self._db.connection.execute(
                     "INSERT INTO state_events (session_id, from_state, to_state, occurred_at_utc) "
                     "VALUES (?, ?, ?, ?)",
@@ -79,7 +91,7 @@ class SessionRepository:
     ) -> None:
         ended_at = ended_at or datetime.now(timezone.utc)
         try:
-            with self._db.connection:
+            with self._db.lock, self._db.connection:
                 self._db.connection.execute(
                     "UPDATE sessions SET ended_at_utc = ?, total_work_seconds = ?, end_reason = ? "
                     "WHERE id = ?",
@@ -90,35 +102,53 @@ class SessionRepository:
 
     def get_session(self, session_id: int) -> Optional[SessionRecord]:
         try:
-            row = self._db.connection.execute(
-                "SELECT id, started_at_utc, ended_at_utc, total_work_seconds, end_reason "
-                "FROM sessions WHERE id = ?",
-                (session_id,),
-            ).fetchone()
+            with self._db.lock:
+                row = self._db.connection.execute(
+                    "SELECT id, started_at_utc, ended_at_utc, total_work_seconds, end_reason "
+                    "FROM sessions WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
         except sqlite3.Error as exc:
             raise StorageError(f"failed to fetch session {session_id}: {exc}") from exc
         return SessionRecord(**dict(row)) if row is not None else None
 
     def list_state_events(self, session_id: int) -> list[StateEventRecord]:
         try:
-            rows = self._db.connection.execute(
-                "SELECT id, session_id, from_state, to_state, occurred_at_utc "
-                "FROM state_events WHERE session_id = ? ORDER BY id",
-                (session_id,),
-            ).fetchall()
+            with self._db.lock:
+                rows = self._db.connection.execute(
+                    "SELECT id, session_id, from_state, to_state, occurred_at_utc "
+                    "FROM state_events WHERE session_id = ? ORDER BY id",
+                    (session_id,),
+                ).fetchall()
         except sqlite3.Error as exc:
             raise StorageError(f"failed to list state events for session {session_id}: {exc}") from exc
         return [StateEventRecord(**dict(row)) for row in rows]
 
     def list_recent_sessions(self, limit: int = 20) -> list[SessionRecord]:
         try:
-            rows = self._db.connection.execute(
-                "SELECT id, started_at_utc, ended_at_utc, total_work_seconds, end_reason "
-                "FROM sessions ORDER BY started_at_utc DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            with self._db.lock:
+                rows = self._db.connection.execute(
+                    "SELECT id, started_at_utc, ended_at_utc, total_work_seconds, end_reason "
+                    "FROM sessions ORDER BY started_at_utc DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
         except sqlite3.Error as exc:
             raise StorageError(f"failed to list recent sessions: {exc}") from exc
+        return [SessionRecord(**dict(row)) for row in rows]
+
+    def list_unfinalized_sessions(self) -> list[SessionRecord]:
+        """Sessions left behind by a crash or a kill -9: never reached
+        end_reason "app_exit" (or a prior recovery pass's "interrupted").
+        Used once at startup to reconcile them - see
+        FocusTrackerController._recover_stale_sessions()."""
+        try:
+            with self._db.lock:
+                rows = self._db.connection.execute(
+                    "SELECT id, started_at_utc, ended_at_utc, total_work_seconds, end_reason "
+                    f"FROM sessions WHERE {_UNFINALIZED_END_REASONS_SQL}"
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise StorageError(f"failed to list unfinalized sessions: {exc}") from exc
         return [SessionRecord(**dict(row)) for row in rows]
 
     def get_total_work_seconds_since(
@@ -134,7 +164,8 @@ class SessionRepository:
             query += " AND id != ?"
             params.append(exclude_session_id)
         try:
-            row = self._db.connection.execute(query, params).fetchone()
+            with self._db.lock:
+                row = self._db.connection.execute(query, params).fetchone()
         except sqlite3.Error as exc:
             raise StorageError(f"failed to sum work seconds since {start_utc}: {exc}") from exc
         return float(row["total"])

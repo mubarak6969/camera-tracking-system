@@ -149,6 +149,46 @@ def test_get_total_work_seconds_since_can_exclude_a_session(db):
     assert total == pytest.approx(30)
 
 
+def test_list_unfinalized_sessions_includes_null_and_in_progress(db):
+    repo = SessionRepository(db)
+    never_checkpointed_id = repo.create_session()
+    checkpointed_id = repo.create_session()
+    repo.end_session(checkpointed_id, total_work_seconds=5, end_reason="in_progress")
+    clean_id = repo.create_session()
+    repo.end_session(clean_id, total_work_seconds=10, end_reason="app_exit")
+    recovered_id = repo.create_session()
+    repo.end_session(recovered_id, total_work_seconds=1, end_reason="interrupted")
+
+    unfinalized = {s.id for s in repo.list_unfinalized_sessions()}
+
+    assert unfinalized == {never_checkpointed_id, checkpointed_id}
+
+
+def test_concurrent_writes_from_multiple_threads_do_not_raise_or_lose_rows(db):
+    import threading
+
+    repo = SessionRepository(db)
+    errors: list = []
+
+    def worker(n: int) -> None:
+        try:
+            for _ in range(20):
+                session_id = repo.create_session()
+                repo.record_state_event(session_id, "WORKING", "INACTIVE")
+                repo.end_session(session_id, total_work_seconds=1.0, end_reason="app_exit")
+        except Exception as exc:  # pragma: no cover - failure path only
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert errors == []
+    assert len(repo.list_recent_sessions(limit=1000)) == 8 * 20
+
+
 def test_database_creates_parent_directory(tmp_path):
     nested_path = tmp_path / "nested" / "dir" / "focus.db"
     database = Database(nested_path)

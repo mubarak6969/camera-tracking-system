@@ -166,3 +166,81 @@ def test_idle_threshold_must_be_positive(fake_clock):
     session = FocusSession(clock=fake_clock)
     with pytest.raises(ValueError):
         SensorBridge(session, idle_threshold_seconds=0, clock=fake_clock)
+
+
+# -- PAUSED / AWAY interaction regression tests --------------------------
+#
+# Fixed bug: a manually paused session used to be silently moved to AWAY
+# the instant the camera reported no face, because presence_lost() was
+# (and still is, at the pure StateMachine level) valid from any non-AWAY
+# state including PAUSED. The fix lives in handle_presence(): it now
+# refuses to forward a "not present" reading while the session is PAUSED.
+
+
+def test_manual_pause_survives_camera_reporting_no_presence(fake_clock):
+    session, bridge = _make(fake_clock)
+    session.pause()
+    assert session.state is FocusState.PAUSED
+
+    bridge.handle_presence(PresenceEvent(present=False, monotonic_timestamp=fake_clock()))
+
+    assert session.state is FocusState.PAUSED  # not silently moved to AWAY
+
+
+def test_manual_pause_survives_repeated_no_presence_readings(fake_clock):
+    session, bridge = _make(fake_clock)
+    session.pause()
+
+    for _ in range(5):
+        bridge.handle_presence(PresenceEvent(present=False, monotonic_timestamp=fake_clock()))
+        fake_clock.advance(1)
+
+    assert session.state is FocusState.PAUSED
+
+
+def test_manual_pause_survives_no_presence_then_resumes_normally(fake_clock):
+    session, bridge = _make(fake_clock)
+    fake_clock.advance(1)
+    session.pause()
+    bridge.handle_presence(PresenceEvent(present=False, monotonic_timestamp=fake_clock()))
+    fake_clock.advance(5)
+
+    session.resume()  # only an explicit user action ends a manual pause
+
+    assert session.state is FocusState.WORKING
+
+
+def test_camera_confirming_presence_while_manually_paused_is_still_a_no_op(fake_clock):
+    session, bridge = _make(fake_clock)
+    session.pause()
+
+    bridge.handle_presence(PresenceEvent(present=True, monotonic_timestamp=fake_clock()))
+
+    assert session.state is FocusState.PAUSED  # presence_detected() only applies coming from AWAY
+
+
+def test_lock_induced_pause_still_forces_away_on_unlock(fake_clock):
+    # Contrast with the manual-pause tests above: a lock/sleep-induced
+    # pause is not a user decision, so unlock must still force AWAY,
+    # exactly as before this fix.
+    session, bridge = _make(fake_clock)
+    bridge.handle_lock_event(SessionLockEvent(kind=SessionLockEventKind.LOCKED, monotonic_timestamp=fake_clock()))
+    assert session.state is FocusState.PAUSED
+
+    bridge.handle_lock_event(SessionLockEvent(kind=SessionLockEventKind.UNLOCKED, monotonic_timestamp=fake_clock()))
+
+    assert session.state is FocusState.AWAY
+
+
+def test_away_from_actual_absence_only_resumes_on_confirmed_presence(fake_clock):
+    session, bridge = _make(fake_clock)
+    bridge.handle_activity(ActivityEvent(monotonic_timestamp=fake_clock()))
+    bridge.handle_presence(PresenceEvent(present=False, monotonic_timestamp=fake_clock()))
+    assert session.state is FocusState.AWAY
+
+    fake_clock.advance(1)
+    bridge.poll()  # no presence signal yet - must still be AWAY
+    assert session.state is FocusState.AWAY
+
+    bridge.handle_presence(PresenceEvent(present=True, monotonic_timestamp=fake_clock()))
+    assert session.state is FocusState.WORKING

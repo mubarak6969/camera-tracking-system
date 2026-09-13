@@ -42,6 +42,7 @@ from focus_tracker.input_monitor.activity_worker import InputActivityWorker
 from focus_tracker.platform_win.session_monitor import WindowsSessionMonitor
 from focus_tracker.storage.db import Database, StorageError
 from focus_tracker.storage.repository import SessionRecord, SessionRepository
+from focus_tracker.timeutil import local_midnight_utc
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,9 @@ class FocusTrackerController(QObject):
         self._cached_today_historical_total = 0.0
         self._camera_available: Optional[bool] = None
         self._input_available = True
+        self._shutting_down = False
+
+        self._recover_stale_sessions()
 
         self._session = FocusSession(
             grace_period_seconds=config.inactivity_grace_period_seconds,
@@ -152,7 +156,16 @@ class FocusTrackerController(QObject):
         """Stops every background worker and, if a session was actually
         started, writes its final total before closing the database. Safe
         to call even if start() was never called or presence was never
-        established."""
+        established.
+
+        Setting _shutting_down first (before touching any worker) means
+        every callback below becomes a no-op immediately, even if a
+        worker's stop() takes a moment to actually join its thread - no
+        in-flight camera/input/lock/poll callback can act on a
+        session/repository that shutdown is in the middle of tearing down."""
+        with self._lock:
+            self._shutting_down = True
+
         self._poller.stop()
         self._checkpoint_timer.stop()
         try:
@@ -217,7 +230,7 @@ class FocusTrackerController(QObject):
 
     def pause(self) -> None:
         with self._lock:
-            if not self._presence_established:
+            if self._shutting_down or not self._presence_established:
                 return
             try:
                 self._session.pause()
@@ -226,7 +239,7 @@ class FocusTrackerController(QObject):
 
     def resume(self) -> None:
         with self._lock:
-            if not self._presence_established:
+            if self._shutting_down or not self._presence_established:
                 return
             try:
                 self._session.resume()
@@ -235,7 +248,7 @@ class FocusTrackerController(QObject):
 
     def continue_working(self) -> None:
         with self._lock:
-            if not self._presence_established:
+            if self._shutting_down or not self._presence_established:
                 return
             try:
                 self._session.continue_working()
@@ -246,6 +259,8 @@ class FocusTrackerController(QObject):
 
     def _on_presence_event(self, event: PresenceEvent) -> None:
         with self._lock:
+            if self._shutting_down:
+                return
             first_time = not self._presence_established
             if first_time:
                 self._presence_established = True
@@ -258,29 +273,33 @@ class FocusTrackerController(QObject):
 
     def _on_activity_event(self, event: ActivityEvent) -> None:
         with self._lock:
-            if not self._presence_established:
+            if self._shutting_down or not self._presence_established:
                 return
             self._bridge.handle_activity(event)
 
     def _on_poll(self) -> None:
         with self._lock:
-            if not self._presence_established:
+            if self._shutting_down or not self._presence_established:
                 return
             self._bridge.poll()
 
     def _on_lock_event(self, event: SessionLockEvent) -> None:
         with self._lock:
-            if not self._presence_established:
+            if self._shutting_down or not self._presence_established:
                 return
             self._bridge.handle_lock_event(event)
 
     def _on_camera_availability_change(self, available: bool) -> None:
+        if self._shutting_down:
+            return
         self._camera_available = available
         self.camera_status_changed.emit(available)
         if not available:
             self._report_error("camera", "Camera unavailable - retrying in the background.")
 
     def _on_input_error(self, exc: Exception) -> None:
+        if self._shutting_down:
+            return
         self._input_available = False
         self._report_error("input", f"Keyboard/mouse monitoring failed to start: {exc}")
 
@@ -311,12 +330,39 @@ class FocusTrackerController(QObject):
             self._report_error("database", str(exc))
             return None
 
+    def _recover_stale_sessions(self) -> None:
+        """Runs once, at startup, before any new session is created. Any
+        row still marked NULL/"in_progress" was left behind by a crash or a
+        forced kill of a previous run (a clean exit always writes
+        end_reason="app_exit"). Finalizes each one with whatever total was
+        last checkpointed - never discarding it - and a distinct
+        "interrupted" reason, so history stays honest and no ghost
+        "in_progress" row lingers forever. This never creates a new
+        session and never touches the session this run will create later,
+        so it cannot produce duplicates."""
+        try:
+            stale_sessions = self._repository.list_unfinalized_sessions()
+        except StorageError as exc:
+            self._report_error("database", str(exc))
+            return
+        now = datetime.now(timezone.utc)
+        for stale in stale_sessions:
+            try:
+                self._repository.end_session(
+                    stale.id,
+                    total_work_seconds=stale.total_work_seconds,
+                    end_reason="interrupted",
+                    ended_at=now,
+                )
+            except StorageError as exc:
+                self._report_error("database", str(exc))
+
     def _checkpoint(self) -> None:
         """Runs every _CHECKPOINT_INTERVAL_SECONDS so a crash or unexpected
         shutdown loses at most one interval's worth of the running total,
         never the whole session."""
         with self._lock:
-            if not self._presence_established or self._session_id is None:
+            if self._shutting_down or not self._presence_established or self._session_id is None:
                 return
             session_id = self._session_id
             total = self._session.elapsed_work_time
@@ -328,8 +374,10 @@ class FocusTrackerController(QObject):
 
     def _refresh_today_historical_total(self) -> None:
         with self._lock:
+            if self._shutting_down:
+                return
             session_id = self._session_id
-        today_start_utc = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = local_midnight_utc()
         try:
             total = self._repository.get_total_work_seconds_since(
                 today_start_utc, exclude_session_id=session_id

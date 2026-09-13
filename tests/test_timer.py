@@ -87,3 +87,42 @@ def test_resume_after_end_raises(fake_clock):
     timer.end()
     with pytest.raises(TimerStateError):
         timer.resume()
+
+
+def test_end_while_paused_returns_accumulated_total_without_negative_duration(fake_clock):
+    timer = SessionTimer(clock=fake_clock)
+    timer.start()
+    fake_clock.advance(30)
+    timer.pause()
+    fake_clock.advance(9999)  # a long paused gap must never leak into the total
+
+    total = timer.end()
+
+    assert total == pytest.approx(30)
+    assert total >= 0
+
+
+def test_end_called_twice_is_idempotent(fake_clock):
+    timer = SessionTimer(clock=fake_clock)
+    timer.start()
+    fake_clock.advance(15)
+
+    first_total = timer.end()
+    fake_clock.advance(100)  # time passing after end() must never be counted
+    second_total = timer.end()
+
+    assert first_total == pytest.approx(15)
+    assert second_total == pytest.approx(15)
+
+
+def test_elapsed_never_goes_negative_across_many_pause_resume_cycles(fake_clock):
+    timer = SessionTimer(clock=fake_clock)
+    timer.start()
+    for _ in range(50):
+        fake_clock.advance(2)
+        timer.pause()
+        fake_clock.advance(3)
+        timer.resume()
+
+    assert timer.elapsed() == pytest.approx(100)  # 50 * 2s of actual counted time
+    assert timer.elapsed() >= 0

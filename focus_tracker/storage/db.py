@@ -13,6 +13,7 @@ what we need with no extra schema.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Union
 
@@ -50,6 +51,13 @@ class Database:
     def __init__(self, path: Union[str, Path]) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # The controller's camera/input/poll/checkpoint threads can all reach
+        # this same connection. check_same_thread=False lets any thread use
+        # it, but does not by itself guarantee two threads never interleave
+        # statements on it - this lock is what actually serializes that,
+        # rather than relying on assumptions about how the local SQLite
+        # build was compiled.
+        self.lock = threading.RLock()
         try:
             self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row

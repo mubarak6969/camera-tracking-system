@@ -20,6 +20,8 @@ __pycache__/
 build/
 dist/
 *.spec
+# ...except the one hand-written, committed PyInstaller build config.
+!AIFocusTracker.spec
 
 # Editor / OS cruft
 .vscode/

@@ -48,6 +48,15 @@ class SensorBridge:
         if event.present:
             self._session.presence_detected()
         else:
+            if self._session.state is FocusState.PAUSED:
+                # A manually paused session must stay paused regardless of
+                # what the camera sees - only an explicit resume() (or the
+                # lock-monitor's own forced-AWAY path below, for a lock/sleep
+                # induced pause) may move it out of PAUSED. Without this
+                # guard, presence_lost() (which core still allows from any
+                # non-AWAY state, including PAUSED) would silently overwrite
+                # a deliberate user pause with AWAY.
+                return
             self._session.presence_lost()
 
     def handle_activity(self, event: ActivityEvent) -> None:
