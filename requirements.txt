@@ -1,0 +1,7 @@
+# Runtime dependencies for AI Focus Tracker.
+# Camera, input-monitoring, and UI code are not implemented yet in this
+# phase, but the pinned ranges are declared now so the environment is
+# reproducible once those modules land.
+PySide6>=6.7,<6.8
+opencv-python>=4.9,<5.0
+pynput>=1.7,<2.0
