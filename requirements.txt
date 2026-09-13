@@ -1,7 +1,10 @@
 # Runtime dependencies for AI Focus Tracker.
-# Camera, input-monitoring, and UI code are not implemented yet in this
-# phase, but the pinned ranges are declared now so the environment is
-# reproducible once those modules land.
+# UI code is not implemented yet in this phase, but PySide6 is declared
+# now so the environment is reproducible once it lands.
 PySide6>=6.7,<6.8
 opencv-python>=4.9,<5.0
 pynput>=1.7,<2.0
+
+# Windows-only: lock/sleep/wake detection (focus_tracker/platform_win/).
+# Isolated to that one module - nothing else in the app imports it.
+pywin32>=306,<307
