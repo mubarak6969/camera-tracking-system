@@ -174,3 +174,53 @@ def test_stop_releases_the_camera_cleanly(fake_clock):
     worker.stop()
     assert source.released is True
     assert worker.is_running is False
+
+
+def test_availability_callback_fires_once_on_first_failure_and_once_on_recovery(fake_clock):
+    open_attempts: list = []
+
+    def factory():
+        source = FakeFrameSource(opened=len(open_attempts) >= 2)
+        open_attempts.append(source)
+        return source
+
+    availability_events: list = []
+    worker = CameraPresenceWorker(
+        on_presence_change=lambda e: None,
+        on_availability_change=availability_events.append,
+        confirm_frames=1,
+        clock=fake_clock,
+        frame_source_factory=factory,
+        detector=FakeDetector([True]),
+    )
+
+    worker._sample_once()  # fails to open -> first availability event: False
+    assert availability_events == [False]
+
+    fake_clock.advance(2)
+    worker._sample_once()  # still failing -> no duplicate event
+    assert availability_events == [False]
+
+    fake_clock.advance(3)
+    worker._sample_once()  # succeeds -> availability event: True
+    assert availability_events == [False, True]
+
+
+def test_availability_callback_fires_on_read_failure_after_success(fake_clock):
+    source = FakeFrameSource(opened=True)
+    availability_events: list = []
+    worker = CameraPresenceWorker(
+        on_presence_change=lambda e: None,
+        on_availability_change=availability_events.append,
+        confirm_frames=1,
+        clock=fake_clock,
+        frame_source_factory=lambda: source,
+        detector=FakeDetector([True]),
+    )
+
+    worker._sample_once()  # opens fine, reads fine -> available
+    assert availability_events == [True]
+
+    source.read_queue = [RuntimeError("device error")]
+    worker._sample_once()  # read raises -> unavailable
+    assert availability_events == [True, False]

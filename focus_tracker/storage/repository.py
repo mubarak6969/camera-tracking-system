@@ -109,3 +109,32 @@ class SessionRepository:
         except sqlite3.Error as exc:
             raise StorageError(f"failed to list state events for session {session_id}: {exc}") from exc
         return [StateEventRecord(**dict(row)) for row in rows]
+
+    def list_recent_sessions(self, limit: int = 20) -> list[SessionRecord]:
+        try:
+            rows = self._db.connection.execute(
+                "SELECT id, started_at_utc, ended_at_utc, total_work_seconds, end_reason "
+                "FROM sessions ORDER BY started_at_utc DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise StorageError(f"failed to list recent sessions: {exc}") from exc
+        return [SessionRecord(**dict(row)) for row in rows]
+
+    def get_total_work_seconds_since(
+        self, start_utc: datetime, exclude_session_id: Optional[int] = None
+    ) -> float:
+        """Used to compute "today's total": sums total_work_seconds for every
+        session that started at or after `start_utc`. `exclude_session_id`
+        lets the caller add the still-running session's live in-memory
+        elapsed time on top, instead of double-counting its last checkpoint."""
+        query = "SELECT COALESCE(SUM(total_work_seconds), 0) AS total FROM sessions WHERE started_at_utc >= ?"
+        params: list = [start_utc.isoformat()]
+        if exclude_session_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_session_id)
+        try:
+            row = self._db.connection.execute(query, params).fetchone()
+        except sqlite3.Error as exc:
+            raise StorageError(f"failed to sum work seconds since {start_utc}: {exc}") from exc
+        return float(row["total"])

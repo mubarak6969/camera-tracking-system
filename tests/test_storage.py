@@ -98,6 +98,57 @@ def test_get_missing_session_returns_none(db):
     assert repo.get_session(999) is None
 
 
+def test_list_recent_sessions_orders_newest_first(db):
+    repo = SessionRepository(db)
+    early = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    late = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    repo.create_session(started_at=early)
+    repo.create_session(started_at=late)
+
+    sessions = repo.list_recent_sessions()
+
+    assert [s.started_at_utc for s in sessions] == [late.isoformat(), early.isoformat()]
+
+
+def test_list_recent_sessions_respects_limit(db):
+    repo = SessionRepository(db)
+    for _ in range(5):
+        repo.create_session()
+
+    assert len(repo.list_recent_sessions(limit=2)) == 2
+
+
+def test_get_total_work_seconds_since_sums_matching_sessions(db):
+    repo = SessionRepository(db)
+    today = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    yesterday = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    boundary = datetime(2026, 1, 2, 0, 0, tzinfo=timezone.utc)
+
+    old_id = repo.create_session(started_at=yesterday)
+    repo.end_session(old_id, total_work_seconds=999, end_reason="app_exit")
+    today_id = repo.create_session(started_at=today)
+    repo.end_session(today_id, total_work_seconds=42, end_reason="in_progress")
+
+    total = repo.get_total_work_seconds_since(boundary)
+
+    assert total == pytest.approx(42)
+
+
+def test_get_total_work_seconds_since_can_exclude_a_session(db):
+    repo = SessionRepository(db)
+    boundary = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    started = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    ended_id = repo.create_session(started_at=started)
+    repo.end_session(ended_id, total_work_seconds=30, end_reason="app_exit")
+    live_id = repo.create_session(started_at=started)
+    repo.end_session(live_id, total_work_seconds=15, end_reason="in_progress")
+
+    total = repo.get_total_work_seconds_since(boundary, exclude_session_id=live_id)
+
+    assert total == pytest.approx(30)
+
+
 def test_database_creates_parent_directory(tmp_path):
     nested_path = tmp_path / "nested" / "dir" / "focus.db"
     database = Database(nested_path)

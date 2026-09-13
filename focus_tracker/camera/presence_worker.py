@@ -42,8 +42,11 @@ class CameraPresenceWorker:
         clock: Clock = time.monotonic,
         frame_source_factory: Optional[FrameSourceFactory] = None,
         detector: Optional[FaceDetector] = None,
+        on_availability_change: Optional[Callable[[bool], None]] = None,
     ) -> None:
         self._on_presence_change = on_presence_change
+        self._on_availability_change = on_availability_change
+        self._camera_available: Optional[bool] = None
         self._clock = clock
         self._frame_source_factory: FrameSourceFactory = (
             frame_source_factory
@@ -87,11 +90,13 @@ class CameraPresenceWorker:
             except Exception:
                 logger.exception("CameraPresenceWorker: frame read raised, releasing camera")
                 self._release_frame_source()
+                self._mark_unavailable()
                 return
 
             if not ok or frame is None:
                 logger.warning("CameraPresenceWorker: frame read failed, releasing camera")
                 self._release_frame_source()
+                self._mark_unavailable()
                 return
 
             try:
@@ -125,11 +130,25 @@ class CameraPresenceWorker:
 
         if source is None or not source.is_opened():
             self._schedule_retry(now)
+            self._mark_unavailable()
             return None
 
         self._frame_source = source
         self._retry_backoff_seconds = 1.0
+        self._mark_available()
         return source
+
+    def _mark_available(self) -> None:
+        if self._camera_available is not True:
+            self._camera_available = True
+            if self._on_availability_change is not None:
+                self._on_availability_change(True)
+
+    def _mark_unavailable(self) -> None:
+        if self._camera_available is not False:
+            self._camera_available = False
+            if self._on_availability_change is not None:
+                self._on_availability_change(False)
 
     def _schedule_retry(self, now: float) -> None:
         self._next_retry_at = now + self._retry_backoff_seconds
